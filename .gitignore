@@ -1,1 +1,4 @@
 Lib/
+Scripts/
+yolo26x-seg.pt
+__pycache__/
