@@ -68,6 +68,20 @@ ART_PALETTES = {
 
 BIRD_CLASS = 14
 SKY_COLOR = (205, 180, 95)  # cielo warm minimalista en BGR
+ 
+# A simple repeating palette (B, G, R) for track coloring when `rainbow` or default modes used.
+COLOR_PALETTE = [
+    (0, 0, 255),    # red
+    (0, 165, 255),  # orange
+    (0, 255, 255),  # yellow
+    (0, 255, 0),    # green
+    (255, 255, 0),  # cyan
+    (255, 0, 0),    # blue
+    (255, 0, 255),  # magenta
+    (128, 0, 128),  # purple
+    (255, 192, 203),# pink
+    (19, 69, 139),  # brown-ish
+]
 
 
 @dataclass
@@ -109,6 +123,8 @@ def parse_args() -> argparse.Namespace:
                         help="No guardar vídeo de salida.")
     parser.add_argument("--loop", action="store_true",
                         help="Repetir el vídeo en bucle en modo preview.")
+    parser.add_argument("--debug", action="store_true",
+                        help="Mostrar información extra por frame para depuración.")
     return parser.parse_args()
 
 
@@ -171,6 +187,21 @@ def safe_centroid_from_mask(mask: np.ndarray) -> Optional[Tuple[int, int]]:
     if len(xs) == 0:
         return None
     return int(xs.mean()), int(ys.mean())
+
+
+def centroid_from_box(box) -> Tuple[int, int]:
+    """Return integer centroid (x, y) from a bounding box.
+
+    Accepts a sequence or numpy array in (x0, y0, x1, y1) format.
+    """
+    try:
+        x0, y0, x1, y1 = box
+    except Exception:
+        arr = np.asarray(box).ravel()
+        x0, y0, x1, y1 = arr[0], arr[1], arr[2], arr[3]
+    cx = int(round((float(x0) + float(x1)) / 2.0))
+    cy = int(round((float(y0) + float(y1)) / 2.0))
+    return cx, cy
 
 
 def create_sky_background(shape: Tuple[int, int, int]) -> np.ndarray:
@@ -340,9 +371,13 @@ def main() -> None:
     if not os.path.isfile(args.video):
         print(f"Error: vídeo no encontrado: {args.video}")
         sys.exit(1)
+
+    # If the model file isn't present locally we won't exit here.
+    # Ultralytics' `YOLO(...)` may accept a model name or URL and
+    # will attempt to download it if possible. Defer errors to the
+    # loader so the library can handle fetching.
     if not os.path.isfile(args.model):
-        print(f"Error: modelo no encontrado: {args.model}")
-        sys.exit(1)
+        print(f"[WARN] modelo no encontrado localmente: {args.model}. Intentando cargar con ultralytics...")
 
     model = load_yolo_model(args.model)
     device_str = f"cuda:{args.device}" if args.device.isdigit() else args.device
@@ -382,6 +417,7 @@ def main() -> None:
     def process_once() -> int:
         nonlocal total_frames
         frame_count = 0
+        # Use streaming mode to avoid accumulating all results in RAM.
         results = model.track(
             source=args.video,
             device=device_str,
@@ -391,12 +427,31 @@ def main() -> None:
             classes=[BIRD_CLASS],
             conf=args.conf,
             verbose=False,
+            stream=True,
         )
 
         for result in safe_iter_results(results):
             frame = getattr(result, 'orig_img', None)
             if frame is None:
                 continue
+            # Debugging: print detections info
+            if args.debug:
+                det_count = 0
+                cls_list = []
+                try:
+                    if hasattr(result, 'boxes') and result.boxes is not None:
+                        if hasattr(result.boxes, 'xyxy'):
+                            det_count = len(result.boxes.xyxy)
+                        elif hasattr(result.boxes, 'data'):
+                            det_count = len(result.boxes.data)
+                        if hasattr(result.boxes, 'cls') and result.boxes.cls is not None:
+                            try:
+                                cls_list = [int(x) for x in result.boxes.cls.cpu().numpy()]
+                            except Exception:
+                                cls_list = list(result.boxes.cls)
+                except Exception:
+                    pass
+                print(f"[DEBUG] frame detections: {det_count}, classes: {cls_list}")
 
             boxes = np.array(result.boxes.xyxy.cpu()) if hasattr(result.boxes, 'xyxy') else np.array([])
             ids = []
