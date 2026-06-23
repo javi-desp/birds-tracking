@@ -1,0 +1,39 @@
+{
+  "video": "birds2.mp4",
+  "detection": {
+    "threshold": 30,
+    "blur_kernel": 5,
+    "min_area": 20,
+    "max_area": 5000,
+    "morph_iterations": 2,
+    "bg_frames": 50,
+    "adaptive_threshold": false
+  },
+  "tracking": {
+    "max_distance": 80,
+    "max_lost_frames": 8
+  },
+  "visualization": {
+    "render_mode": "overlay",
+    "color_mode": "rainbow",
+    "trail_mode": "fade",
+    "single_color": "red",
+    "background_color": "#00B140",
+    "trail_length": 80,
+    "trail_thickness": 2,
+    "dot_radius": 5,
+    "trail_alpha": 0.7,
+    "bird_contour": true,
+    "show_id": false,
+    "show_hud": true,
+    "hud_color": "white",
+    "dots_spacing": 8,
+    "bird_mask_padding": 8
+  },
+  "output": {
+    "output_file": null,
+    "show_preview": false,
+    "save_mask_video": false,
+    "export_csv": false
+  }
+}
