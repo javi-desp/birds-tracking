@@ -106,6 +106,8 @@ class VisualizationConfig:
 class OutputConfig:
     output_file: Optional[str] = None  # None = auto (output_<video>.mp4)
     show_preview: bool = False          # Mostrar ventana en tiempo real
+    preview_only: bool = False          # No guardar vídeo al usar vista previa interactiva
+    loop_video: bool = False            # Repetir el vídeo en modo preview
     save_mask_video: bool = False       # Guardar también el vídeo de máscara
     export_csv: bool = False            # Exportar trayectorias a CSV
 
@@ -191,11 +193,30 @@ def velocity_to_color(velocity: float, max_vel: float = 30.0) -> Tuple[int, int,
     return (b, g, r)
 
 
-# ---Sustracción de fondo ---
-def build_background(cap: cv2.VideoCapture, n_frames: int) -> np.ndarray:
+# Modos interactivos
+RENDER_MODES = ["overlay", "greenscreen", "blackscreen", "mask"]
+COLOR_MODES = ["rainbow", "single", "heatmap"]
+TRAIL_MODES = ["line", "dots", "fade"]
+PRESET_COLORS = ["red", "green", "blue", "yellow", "cyan", "magenta", "orange", "purple", "white", "black"]
+
+
+def clamp(value: int, min_value: int, max_value: int) -> int:
+    return max(min_value, min(max_value, value))
+
+
+def ensure_odd(value: int) -> int:
+    value = clamp(value, 1, 101)
+    return value if value % 2 == 1 else value + 1
+
+
+def build_background(video_path: str, n_frames: int) -> np.ndarray:
     """Fondo como mediana de n_frames muestras distribuidas uniformemente."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"No se puede abrir el vídeo para calcular el fondo: {video_path}")
+
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    sample = min(n_frames, total)
+    sample = min(max(1, n_frames), total)
     indices = np.linspace(0, total - 1, sample, dtype=int)
     frames = []
     for idx in indices:
@@ -203,10 +224,74 @@ def build_background(cap: cv2.VideoCapture, n_frames: int) -> np.ndarray:
         ret, frame = cap.read()
         if ret:
             frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    cap.release()
+
     if not frames:
         raise RuntimeError("No se pudieron leer frames para calcular el fondo.")
     return np.median(np.stack(frames, axis=0), axis=0).astype(np.uint8)
+
+
+def setup_preview_window(cfg: Config):
+    control_window = "Bird Tracker Controls"
+    preview_window = "Bird Tracker Preview"
+
+    cv2.namedWindow(control_window, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(control_window, 420, 700)
+    cv2.namedWindow(preview_window, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(preview_window, 1200, 600)
+
+    def create_trackbar(name: str, value: int, max_value: int, callback):
+        cv2.createTrackbar(name, control_window, value, max_value, callback)
+
+    def set_visualization(field: str, value: Any):
+        setattr(cfg.visualization, field, value)
+
+    create_trackbar("render_mode", RENDER_MODES.index(cfg.visualization.render_mode), len(RENDER_MODES) - 1,
+                    lambda v: set_visualization("render_mode", RENDER_MODES[v]))
+    create_trackbar("color_mode", COLOR_MODES.index(cfg.visualization.color_mode), len(COLOR_MODES) - 1,
+                    lambda v: set_visualization("color_mode", COLOR_MODES[v]))
+    create_trackbar("trail_mode", TRAIL_MODES.index(cfg.visualization.trail_mode), len(TRAIL_MODES) - 1,
+                    lambda v: set_visualization("trail_mode", TRAIL_MODES[v]))
+    create_trackbar("single_color", PRESET_COLORS.index(cfg.visualization.single_color)
+                    if cfg.visualization.single_color in PRESET_COLORS else 0,
+                    len(PRESET_COLORS) - 1,
+                    lambda v: set_visualization("single_color", PRESET_COLORS[v]))
+    create_trackbar("threshold", clamp(cfg.detection.threshold, 0, 255), 255,
+                    lambda v: setattr(cfg.detection, "threshold", v))
+    create_trackbar("blur_kernel", cfg.detection.blur_kernel, 31,
+                    lambda v: setattr(cfg.detection, "blur_kernel", ensure_odd(max(1, v))))
+    create_trackbar("min_area", clamp(cfg.detection.min_area, 0, 5000), 5000,
+                    lambda v: setattr(cfg.detection, "min_area", max(1, v)))
+    create_trackbar("max_area", clamp(cfg.detection.max_area, 0, 30000), 30000,
+                    lambda v: setattr(cfg.detection, "max_area", max(v, cfg.detection.min_area)))
+    create_trackbar("morph_iter", clamp(cfg.detection.morph_iterations, 0, 10), 10,
+                    lambda v: setattr(cfg.detection, "morph_iterations", v))
+    create_trackbar("max_dist", clamp(cfg.tracking.max_distance, 1, 200), 200,
+                    lambda v: setattr(cfg.tracking, "max_distance", max(1, v)))
+    create_trackbar("max_lost", clamp(cfg.tracking.max_lost_frames, 0, 30), 30,
+                    lambda v: setattr(cfg.tracking, "max_lost_frames", v))
+    create_trackbar("trail_len", clamp(cfg.visualization.trail_length, 0, 200), 200,
+                    lambda v: setattr(cfg.visualization, "trail_length", v))
+    create_trackbar("trail_thk", clamp(cfg.visualization.trail_thickness, 1, 10), 10,
+                    lambda v: setattr(cfg.visualization, "trail_thickness", max(1, v)))
+    create_trackbar("dot_radius", clamp(cfg.visualization.dot_radius, 1, 20), 20,
+                    lambda v: setattr(cfg.visualization, "dot_radius", max(1, v)))
+    create_trackbar("dots_space", clamp(cfg.visualization.dots_spacing, 1, 50), 50,
+                    lambda v: setattr(cfg.visualization, "dots_spacing", max(1, v)))
+    create_trackbar("trail_alpha", int(clamp(cfg.visualization.trail_alpha * 100, 0, 100)), 100,
+                    lambda v: setattr(cfg.visualization, "trail_alpha", v / 100.0))
+    create_trackbar("show_id", int(cfg.visualization.show_id), 1,
+                    lambda v: setattr(cfg.visualization, "show_id", bool(v)))
+    create_trackbar("bird_contour", int(cfg.visualization.bird_contour), 1,
+                    lambda v: setattr(cfg.visualization, "bird_contour", bool(v)))
+    create_trackbar("show_hud", int(cfg.visualization.show_hud), 1,
+                    lambda v: setattr(cfg.visualization, "show_hud", bool(v)))
+    create_trackbar("adaptive", int(cfg.detection.adaptive_threshold), 1,
+                    lambda v: setattr(cfg.detection, "adaptive_threshold", bool(v)))
+
+    print("[INFO] Interfaz interactiva activada. Usa 'q' para salir, 'r' para recalcular el fondo.")
+    print("       Cambia modos, parámetros y observa el vídeo original junto al modificado.")
+    print("       El vídeo se repite en bucle mientras ajustes parámetros.")
 
 
 # ---Detección ---
@@ -460,6 +545,8 @@ def main():
                         help="Ruta al vídeo (sobreescribe config.video).")
     parser.add_argument("--config", default="config.json",
                         help="Fichero de configuración JSON. Default: config.json")
+    parser.add_argument("--preview", action="store_true",
+                        help="Muestra ventana interactiva con controles y vídeo original + modificado.")
     parser.add_argument("--gen-config", action="store_true",
                         help="Genera un config.json de ejemplo y sale.")
     args = parser.parse_args()
@@ -481,6 +568,11 @@ def main():
     if args.video:
         cfg.video = args.video
 
+    if args.preview:
+        cfg.output.show_preview = True
+        cfg.output.preview_only = True
+        cfg.output.loop_video = True
+
     if not cfg.video:
         print("[ERROR] No se especificó vídeo. Ponlo en config.json o como argumento.", file=sys.stderr)
         sys.exit(1)
@@ -501,6 +593,9 @@ def main():
     total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     print(f"[INFO] {cfg.video}  {width}x{height} @ {fps:.1f}fps  {total} frames")
 
+    if args.preview:
+        cfg.output.show_preview = True
+
     # ---Validar colores ---
     try:
         single_color = parse_color(cfg.visualization.single_color)
@@ -510,24 +605,31 @@ def main():
         sys.exit(1)
 
     # ---Fichero de salida ---
-    if not cfg.output.output_file:
-        base, _ = os.path.splitext(os.path.basename(cfg.video))
-        cfg.output.output_file = f"output_{base}.mp4"
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(cfg.output.output_file, fourcc, fps, (width, height))
-    if not out.isOpened():
-        print(f"[ERROR] No se puede escribir en: {cfg.output.output_file}", file=sys.stderr)
-        sys.exit(1)
-
-    # Vídeo de máscara opcional
+    out = None
     mask_writer = None
-    if cfg.output.save_mask_video:
-        mask_path = cfg.output.output_file.replace(".mp4", "_mask.mp4")
-        mask_writer = cv2.VideoWriter(mask_path, fourcc, fps, (width, height))
-
-    # CSV opcional
     csv_file = None
+    if not cfg.output.preview_only:
+        if not cfg.output.output_file:
+            base, _ = os.path.splitext(os.path.basename(cfg.video))
+            cfg.output.output_file = f"output_{base}.mp4"
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = cv2.VideoWriter(cfg.output.output_file, fourcc, fps, (width, height))
+        if not out.isOpened():
+            print(f"[ERROR] No se puede escribir en: {cfg.output.output_file}", file=sys.stderr)
+            sys.exit(1)
+
+        if cfg.output.save_mask_video:
+            mask_path = cfg.output.output_file.replace(".mp4", "_mask.mp4")
+            mask_writer = cv2.VideoWriter(mask_path, fourcc, fps, (width, height))
+
+        if cfg.output.export_csv:
+            csv_path = cfg.output.output_file.replace(".mp4", "_trajectories.csv")
+            csv_file = open(csv_path, "w")
+            csv_file.write("frame,bird_id,x,y\n")
+
+    elif cfg.output.show_preview:
+        print("[INFO] Preview solo: no se guardará vídeo de salida ni CSV mientras pruebas parámetros.")
     if cfg.output.export_csv:
         csv_path = cfg.output.output_file.replace(".mp4", "_trajectories.csv")
         csv_file = open(csv_path, "w")
@@ -535,12 +637,15 @@ def main():
 
     # ---Calcular fondo ---
     print(f"[INFO] Calculando fondo con {cfg.detection.bg_frames} frames…")
-    background = build_background(cap, cfg.detection.bg_frames)
+    background = build_background(cfg.video, cfg.detection.bg_frames)
     print("[INFO] Fondo calculado.")
 
     # ---Tracker y trayectorias ---
     tracker = BirdTracker(cfg.tracking)
     trails: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
+
+    if cfg.output.show_preview:
+        setup_preview_window(cfg)
 
     frame_idx = 0
     print("[INFO] Procesando…")
@@ -548,6 +653,12 @@ def main():
     while True:
         ret, frame = cap.read()
         if not ret:
+            if cfg.output.show_preview and cfg.output.loop_video:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                frame_idx = 0
+                tracker = BirdTracker(cfg.tracking)
+                trails = defaultdict(list)
+                continue
             break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -566,6 +677,15 @@ def main():
             for tid, pos in active.items():
                 csv_file.write(f"{frame_idx},{tid},{pos[0]},{pos[1]}\n")
 
+        try:
+            single_color = parse_color(cfg.visualization.single_color)
+        except ValueError:
+            single_color = NAMED_COLORS["red"]
+        try:
+            bg_color = parse_color(cfg.visualization.background_color)
+        except ValueError:
+            bg_color = NAMED_COLORS["green"]
+
         # Renderizar frame
         frame_out = render_frame(
             frame, mask, valid_contours, active, trails,
@@ -574,23 +694,28 @@ def main():
             frame_idx, total,
         )
 
-        out.write(frame_out)
+        if out is not None:
+            out.write(frame_out)
 
-        if mask_writer:
+        if mask_writer is not None:
             mask_writer.write(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
 
         if cfg.output.show_preview:
-            cv2.imshow("Bird Tracker", frame_out)
+            preview = np.hstack([frame, frame_out]) if frame.shape == frame_out.shape else np.hstack([frame, cv2.resize(frame_out, (frame.shape[1], frame.shape[0]))])
+            cv2.putText(preview, "Original", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(preview, "Modificado", (frame.shape[1] + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.imshow("Bird Tracker Preview", preview)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 print("[INFO] Interrumpido.")
                 break
-            elif key == ord("m"):
-                # Cambiar modo en tiempo real
-                modes = ["overlay", "greenscreen", "blackscreen", "mask"]
-                idx = modes.index(cfg.visualization.render_mode)
-                cfg.visualization.render_mode = modes[(idx + 1) % len(modes)]
-                print(f"[INFO] Modo cambiado a: {cfg.visualization.render_mode}")
+            elif key == ord("r"):
+                print("[INFO] Recalculando fondo con los parámetros actuales...")
+                background = build_background(cfg.video, cfg.detection.bg_frames)
+                print("[INFO] Fondo recalculado.")
+            elif key == ord("a"):
+                cfg.detection.adaptive_threshold = not cfg.detection.adaptive_threshold
+                print(f"[INFO] Adaptive threshold {'activado' if cfg.detection.adaptive_threshold else 'desactivado'}.")
 
         frame_idx += 1
         if frame_idx % 100 == 0:
