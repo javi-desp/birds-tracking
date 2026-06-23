@@ -78,6 +78,9 @@ class DetectionConfig:
     morph_iterations: int = 2      # Iteraciones de morfología de cierre
     bg_frames: int = 50            # Frames para calcular el fondo mediana
     adaptive_threshold: bool = False  # Usar threshold adaptativo (Otsu)
+    use_motion_only: bool = False    # Filtrar solo regiones en movimiento
+    motion_threshold: int = 8       # Threshold para movimiento entre frames
+    motion_blur: int = 3            # Desenfoque aplicado al mapa de movimiento
 
 @dataclass
 class TrackingConfig:
@@ -87,8 +90,9 @@ class TrackingConfig:
 @dataclass
 class VisualizationConfig:
     render_mode: str = "overlay"     # overlay | greenscreen | blackscreen | mask
-    color_mode: str = "rainbow"      # rainbow | single | heatmap
-    trail_mode: str = "fade"         # line | dots | fade
+    color_mode: str = "rainbow"      # rainbow | single | heatmap | emotion | palette
+    art_mode: str = "none"           # none | neon | sunrise | ocean
+    trail_mode: str = "fade"         # line | dots | fade | particles
     single_color: str = "red"        # Color en modo single
     background_color: str = "#00B140" # Color de fondo en modos greenscreen/blackscreen
     trail_length: int = 80           # Longitud de trayectoria (0 = sin límite)
@@ -195,9 +199,33 @@ def velocity_to_color(velocity: float, max_vel: float = 30.0) -> Tuple[int, int,
 
 # Modos interactivos
 RENDER_MODES = ["overlay", "greenscreen", "blackscreen", "mask"]
-COLOR_MODES = ["rainbow", "single", "heatmap"]
-TRAIL_MODES = ["line", "dots", "fade"]
+COLOR_MODES = ["rainbow", "single", "heatmap", "emotion", "palette"]
+ART_MODES = ["none", "neon", "sunrise", "ocean"]
+TRAIL_MODES = ["line", "dots", "fade", "particles"]
 PRESET_COLORS = ["red", "green", "blue", "yellow", "cyan", "magenta", "orange", "purple", "white", "black"]
+ART_PALETTES = {
+    "neon": [
+        (200, 0, 255),
+        (255, 128, 0),
+        (0, 255, 255),
+        (255, 0, 255),
+        (0, 255, 128),
+    ],
+    "sunrise": [
+        (20, 120, 255),
+        (80, 190, 255),
+        (30, 180, 240),
+        (45, 160, 255),
+        (70, 200, 255),
+    ],
+    "ocean": [
+        (220, 130, 0),
+        (50, 170, 255),
+        (100, 210, 210),
+        (165, 190, 255),
+        (255, 230, 100),
+    ],
+}
 
 
 def clamp(value: int, min_value: int, max_value: int) -> int:
@@ -231,6 +259,40 @@ def build_background(video_path: str, n_frames: int) -> np.ndarray:
     return np.median(np.stack(frames, axis=0), axis=0).astype(np.uint8)
 
 
+def create_art_background(shape: Tuple[int, int, int], frame_idx: int, cfg: VisualizationConfig, active_count: int) -> np.ndarray:
+    h, w = shape[:2]
+    x = np.linspace(0, 1, w, dtype=np.float32)
+    y = np.linspace(0, 1, h, dtype=np.float32)
+    xx = np.tile(x, (h, 1))
+    yy = np.tile(y[:, None], (1, w))
+    t = frame_idx * 0.03
+
+    if cfg.art_mode == "neon":
+        layer = np.zeros((h, w, 3), dtype=np.float32)
+        layer[:, :, 0] = (0.3 + 0.3 * np.sin((xx * 3 + t) * 2 * np.pi)) * 255
+        layer[:, :, 1] = (0.1 + 0.2 * np.cos((yy * 4 + t * 1.1) * 2 * np.pi)) * 255
+        layer[:, :, 2] = (0.6 + 0.3 * np.sin((xx * 2 - t) * 2 * np.pi)) * 255
+    elif cfg.art_mode == "sunrise":
+        layer = np.zeros((h, w, 3), dtype=np.float32)
+        layer[:, :, 0] = (0.6 + 0.3 * np.sin((yy * 2 + t) * 2 * np.pi)) * 255
+        layer[:, :, 1] = (0.4 + 0.25 * np.cos((xx * 1.5 - t * 0.8) * 2 * np.pi)) * 255
+        layer[:, :, 2] = (0.8 + 0.1 * np.sin((xx * 1.2 + yy * 1.5 + t) * 2 * np.pi)) * 255
+    elif cfg.art_mode == "ocean":
+        layer = np.zeros((h, w, 3), dtype=np.float32)
+        layer[:, :, 0] = (0.5 + 0.25 * np.sin((yy * 2 + t) * 2 * np.pi)) * 255
+        layer[:, :, 1] = (0.7 + 0.2 * np.cos((xx * 2.5 - t * 0.6) * 2 * np.pi)) * 255
+        layer[:, :, 2] = (0.6 + 0.2 * np.sin((xx * 1.8 + yy * 0.8 - t) * 2 * np.pi)) * 255
+    else:
+        return np.zeros((h, w, 3), dtype=np.uint8)
+
+    if active_count > 0:
+        intensity = min(1.0, 0.4 + active_count * 0.02)
+    else:
+        intensity = 0.25
+    art_bg = np.clip(layer * intensity, 0, 255).astype(np.uint8)
+    return cv2.GaussianBlur(art_bg, (31, 31), 0)
+
+
 def setup_preview_window(cfg: Config):
     control_window = "Bird Tracker Controls"
     preview_window = "Bird Tracker Preview"
@@ -250,6 +312,8 @@ def setup_preview_window(cfg: Config):
                     lambda v: set_visualization("render_mode", RENDER_MODES[v]))
     create_trackbar("color_mode", COLOR_MODES.index(cfg.visualization.color_mode), len(COLOR_MODES) - 1,
                     lambda v: set_visualization("color_mode", COLOR_MODES[v]))
+    create_trackbar("art_mode", ART_MODES.index(cfg.visualization.art_mode), len(ART_MODES) - 1,
+                    lambda v: set_visualization("art_mode", ART_MODES[v]))
     create_trackbar("trail_mode", TRAIL_MODES.index(cfg.visualization.trail_mode), len(TRAIL_MODES) - 1,
                     lambda v: set_visualization("trail_mode", TRAIL_MODES[v]))
     create_trackbar("single_color", PRESET_COLORS.index(cfg.visualization.single_color)
@@ -266,6 +330,12 @@ def setup_preview_window(cfg: Config):
                     lambda v: setattr(cfg.detection, "max_area", max(v, cfg.detection.min_area)))
     create_trackbar("morph_iter", clamp(cfg.detection.morph_iterations, 0, 10), 10,
                     lambda v: setattr(cfg.detection, "morph_iterations", v))
+    create_trackbar("use_motion", int(cfg.detection.use_motion_only), 1,
+                    lambda v: setattr(cfg.detection, "use_motion_only", bool(v)))
+    create_trackbar("motion_thr", clamp(cfg.detection.motion_threshold, 0, 255), 255,
+                    lambda v: setattr(cfg.detection, "motion_threshold", max(1, v)))
+    create_trackbar("motion_blur", clamp(cfg.detection.motion_blur, 1, 31), 31,
+                    lambda v: setattr(cfg.detection, "motion_blur", ensure_odd(max(1, v))))
     create_trackbar("max_dist", clamp(cfg.tracking.max_distance, 1, 200), 200,
                     lambda v: setattr(cfg.tracking, "max_distance", max(1, v)))
     create_trackbar("max_lost", clamp(cfg.tracking.max_lost_frames, 0, 30), 30,
@@ -297,7 +367,8 @@ def setup_preview_window(cfg: Config):
 # ---Detección ---
 def detect_birds(frame_gray: np.ndarray,
                  background: np.ndarray,
-                 cfg: DetectionConfig):
+                 cfg: DetectionConfig,
+                 prev_gray: Optional[np.ndarray] = None):
     """
     Devuelve:
       centroids  : lista de (cx, cy)
@@ -312,9 +383,23 @@ def detect_birds(frame_gray: np.ndarray,
         diff = cv2.GaussianBlur(diff, (bk, bk), 0)
 
     if cfg.adaptive_threshold:
-        _, mask = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, bg_mask = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     else:
-        _, mask = cv2.threshold(diff, cfg.threshold, 255, cv2.THRESH_BINARY)
+        _, bg_mask = cv2.threshold(diff, cfg.threshold, 255, cv2.THRESH_BINARY)
+
+    if cfg.use_motion_only and prev_gray is not None:
+        motion = cv2.absdiff(frame_gray, prev_gray)
+        mbk = cfg.motion_blur
+        if mbk > 1:
+            mbk = mbk if mbk % 2 == 1 else mbk + 1
+            motion = cv2.GaussianBlur(motion, (mbk, mbk), 0)
+        _, motion_mask = cv2.threshold(motion, cfg.motion_threshold, 255, cv2.THRESH_BINARY)
+        motion_mask = cv2.morphologyEx(motion_mask, cv2.MORPH_CLOSE,
+                                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+                                       iterations=1)
+        mask = cv2.bitwise_and(bg_mask, motion_mask)
+    else:
+        mask = bg_mask
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel,
@@ -409,20 +494,34 @@ class BirdTracker:
         for tid in to_del:
             del self.tracks[tid]
 
-    def get_color(self, tid: int, color_mode: str) -> Tuple[int, int, int]:
+    def get_color(self, tid: int, cfg: VisualizationConfig) -> Tuple[int, int, int]:
         track = self.tracks.get(tid)
+        color_mode = cfg.color_mode
         if track is None:
-            # Track ya eliminado: usar color guardado en cache o fallback
             color_idx = self._color_cache.get(tid, 0)
             if color_mode == "rainbow":
                 return RAINBOW_COLORS[color_idx % len(RAINBOW_COLORS)]
-            return (0, 0, 255)
+            if color_mode == "heatmap":
+                return velocity_to_color(0.0)
+            if color_mode == "emotion":
+                return velocity_to_color(0.0)
+            if color_mode == "palette" and cfg.art_mode in ART_PALETTES:
+                palette = ART_PALETTES[cfg.art_mode]
+                return palette[color_idx % len(palette)]
+            return NAMED_COLORS.get(cfg.single_color, (0, 0, 255))
         if color_mode == "rainbow":
             return RAINBOW_COLORS[track["color_idx"] % len(RAINBOW_COLORS)]
         if color_mode == "heatmap":
             vel = track.get("velocity", 0.0)
             return velocity_to_color(vel)
-        return (0, 0, 255)  # fallback rojo
+        if color_mode == "emotion":
+            vel = track.get("velocity", 0.0)
+            base = velocity_to_color(vel, max_vel=40.0)
+            return base
+        if color_mode == "palette" and cfg.art_mode in ART_PALETTES:
+            palette = ART_PALETTES[cfg.art_mode]
+            return palette[track["color_idx"] % len(palette)]
+        return NAMED_COLORS.get(cfg.single_color, (0, 0, 255))
 
 
 # ---Renderizado ---
@@ -442,12 +541,18 @@ def render_frame(frame: np.ndarray,
     h, w = frame.shape[:2]
 
     # ---Construir fondo del frame de salida ---
+    art_bg = None
+    if cfg.art_mode != "none":
+        art_bg = create_art_background(frame.shape, frame_idx, cfg, len(active))
+
     if render_mode == "mask":
         frame_out = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
     elif render_mode in ("greenscreen", "blackscreen"):
-        # Fondo liso del color especificado
-        background_frame = np.full((h, w, 3), bg_color, dtype=np.uint8)
+        if art_bg is not None:
+            background_frame = art_bg
+        else:
+            background_frame = np.full((h, w, 3), bg_color, dtype=np.uint8)
 
         # Dilatamos la máscara para incluir un poco de contexto alrededor del pájaro
         pad = cfg.bird_mask_padding
@@ -465,6 +570,8 @@ def render_frame(frame: np.ndarray,
 
     else:  # overlay
         frame_out = frame.copy()
+        if art_bg is not None:
+            frame_out = cv2.addWeighted(frame_out, 0.7, art_bg, 0.3, 0)
 
     # ---Dibujar trayectorias ---
     trail_layer = frame_out.copy()
@@ -476,7 +583,7 @@ def render_frame(frame: np.ndarray,
         if cfg.color_mode == "single":
             color = single_color
         else:
-            color = tracker.get_color(tid, cfg.color_mode)
+            color = tracker.get_color(tid, cfg)
 
         n = len(trail)
 
@@ -497,6 +604,16 @@ def render_frame(frame: np.ndarray,
                 seg_color = tuple(int(c * alpha_seg) for c in color)
                 thickness = max(1, int(cfg.trail_thickness * alpha_seg + 0.5))
                 cv2.line(trail_layer, trail[i-1], trail[i], seg_color, thickness)
+        elif cfg.trail_mode == "particles" and n >= 1:
+            for i, pt in enumerate(trail):
+                alpha_part = (i + 1) / n
+                radius = max(1, int(cfg.trail_thickness * (0.5 + alpha_part * 0.8)))
+                part_color = tuple(int(c * (0.25 + 0.75 * alpha_part)) for c in color)
+                cv2.circle(trail_layer, pt, radius, part_color, -1)
+                if i % max(1, n // 10) == 0:
+                    jitter = ((i * 3) % 5 - 2, (i * 5) % 5 - 2)
+                    jitter_pt = (pt[0] + jitter[0], pt[1] + jitter[1])
+                    cv2.circle(trail_layer, jitter_pt, max(1, radius - 1), part_color, -1)
 
     # Mezclar capa de trayectorias
     frame_out = cv2.addWeighted(trail_layer, cfg.trail_alpha,
@@ -507,7 +624,7 @@ def render_frame(frame: np.ndarray,
         if cfg.color_mode == "single":
             color = single_color
         else:
-            color = tracker.get_color(tid, cfg.color_mode)
+            color = tracker.get_color(tid, cfg)
 
         cv2.circle(frame_out, pos, cfg.dot_radius, color, -1)
         if cfg.bird_contour:
@@ -524,7 +641,7 @@ def render_frame(frame: np.ndarray,
         except ValueError:
             hud_color = (255, 255, 255)
 
-        mode_str = f"{cfg.render_mode} | {cfg.color_mode} | trail:{cfg.trail_mode}"
+        mode_str = f"{cfg.render_mode} | art:{cfg.art_mode} | {cfg.color_mode} | trail:{cfg.trail_mode}"
         cv2.putText(frame_out,
                     f"Frame {frame_idx+1}/{total_frames}  Pajaros activos: {len(active)}",
                     (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, hud_color, 2, cv2.LINE_AA)
@@ -630,10 +747,6 @@ def main():
 
     elif cfg.output.show_preview:
         print("[INFO] Preview solo: no se guardará vídeo de salida ni CSV mientras pruebas parámetros.")
-    if cfg.output.export_csv:
-        csv_path = cfg.output.output_file.replace(".mp4", "_trajectories.csv")
-        csv_file = open(csv_path, "w")
-        csv_file.write("frame,bird_id,x,y\n")
 
     # ---Calcular fondo ---
     print(f"[INFO] Calculando fondo con {cfg.detection.bg_frames} frames…")
@@ -648,6 +761,7 @@ def main():
         setup_preview_window(cfg)
 
     frame_idx = 0
+    prev_gray: Optional[np.ndarray] = None
     print("[INFO] Procesando…")
 
     while True:
@@ -658,11 +772,12 @@ def main():
                 frame_idx = 0
                 tracker = BirdTracker(cfg.tracking)
                 trails = defaultdict(list)
+                prev_gray = None
                 continue
             break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        centroids, valid_contours, mask = detect_birds(gray, background, cfg.detection)
+        centroids, valid_contours, mask = detect_birds(gray, background, cfg.detection, prev_gray)
         active = tracker.update(centroids)
 
         # Actualizar trayectorias
@@ -717,6 +832,7 @@ def main():
                 cfg.detection.adaptive_threshold = not cfg.detection.adaptive_threshold
                 print(f"[INFO] Adaptive threshold {'activado' if cfg.detection.adaptive_threshold else 'desactivado'}.")
 
+        prev_gray = gray
         frame_idx += 1
         if frame_idx % 100 == 0:
             print(f"  {frame_idx}/{total} ({frame_idx/max(total,1)*100:.1f}%)")
